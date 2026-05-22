@@ -29,13 +29,17 @@ class PasswordResetOTP(models.Model):
 class LiveProgram(models.Model):
     title = models.CharField(max_length=200)
     category = models.CharField(max_length=100)
-    video_file = models.FileField(upload_to='videos/live/')
+    video_file = models.FileField(upload_to='videos/live/', blank=True, null=True)
     # uploaded_at = models.DateTimeField(auto_now_add=True)
-# to control what shows on the Live TV screen
+    # to control what shows on the Live TV screen
     is_live = models.BooleanField(default=False) 
     hls_playlist_url = models.CharField(max_length=500, blank=True, null=True)
+    
+    # Analytics Metrics
+    likes = models.IntegerField(default=0)
+    viewers_count = models.IntegerField(default=0)
 
-    def __save__(self, *args, **kwargs):
+    def save(self, *args, **kwargs):
         # Logic to ensure only ONE video is live at a time
         if self.is_live:
             LiveProgram.objects.filter(is_live=True).update(is_live=False)
@@ -46,7 +50,7 @@ class LiveProgram(models.Model):
 # =========================
 @receiver(post_save, sender=LiveProgram)
 def convert_to_hls(sender, instance, created, **kwargs):
-    if created:
+    if created and instance.video_file:
         input_path = instance.video_file.path
 
         # Create folder for HLS output
@@ -70,5 +74,10 @@ def convert_to_hls(sender, instance, created, **kwargs):
         try:
             subprocess.Popen(cmd)
             print(f"HLS Conversion started for {instance.title}")
+            
+            # Save the relative URL to access the HLS stream
+            relative_playlist_path = f"videos/live/hls_{instance.id}/playlist.m3u8"
+            instance.hls_playlist_url = f"/media/{relative_playlist_path}"
+            instance.save()
         except Exception as e:
             print(f"FFmpeg Error: {e}")

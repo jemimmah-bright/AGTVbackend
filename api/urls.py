@@ -1,9 +1,7 @@
 from django.urls import path
-from .views import CurrentLiveStreamView
 from .views import RegisterView, LoginView, RequestOTPView
-from .views import VerifyAndResetView
-from .views import VerifyOTPView
-from .views import VideoUploadView , CurrentLiveStreamView
+from .views import VerifyAndResetView, VerifyOTPView
+from .views import VideoUploadView, CurrentLiveStreamView, VideoListView, VideoDetailUpdateDeleteView, AdminAnalyticsView
 
 urlpatterns = [
     path('register/', RegisterView.as_view(), name='register'),
@@ -13,8 +11,7 @@ urlpatterns = [
     path('verify-otp/', VerifyOTPView.as_view(), name='verify-otp'),
     path('upload/', VideoUploadView.as_view(), name='video-upload'),
     path('live-now/', CurrentLiveStreamView.as_view(), name='live-now'),
-    path('live-now/', CurrentLiveStreamView.as_view(), name='live-now'),
-    
-
-    
+    path('videos/', VideoListView.as_view(), name='video-list'),
+    path('videos/<int:pk>/', VideoDetailUpdateDeleteView.as_view(), name='video-detail'),
+    path('admin/stats/', AdminAnalyticsView.as_view(), name='admin-stats'),
 ]
