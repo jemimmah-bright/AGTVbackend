@@ -6,6 +6,7 @@ from django.contrib.auth import authenticate, get_user_model
 from rest_framework import status, generics
 from rest_framework.views import APIView
 from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from rest_framework.authtoken.models import Token
 from rest_framework.parsers import MultiPartParser, FormParser
 
@@ -35,22 +36,66 @@ class RegisterView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+class AdminRegisterView(APIView):
+
+    def post(self, request):
+        email = request.data.get("email")
+        password = request.data.get("password")
+        username = request.data.get("username") or (email.split("@")[0] if email else None)
+
+        if not email or not password:
+            return Response(
+                {"error": "Email and password are required for admin registration."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if User.objects.filter(email__iexact=email).exists():
+            return Response(
+                {"error": "An account with this email already exists."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if User.objects.filter(username__iexact=username).exists():
+            username = f"{username}_{User.objects.count() + 1}"
+
+        user = User.objects.create_superuser(
+            username=username,
+            email=email,
+            password=password,
+        )
+        token = Token.objects.create(user=user)
+
+        return Response({
+            "token": token.key,
+            "username": user.username,
+            "email": user.email,
+            "is_admin": True,
+            "message": "Admin registered successfully"
+        }, status=status.HTTP_201_CREATED)
+
+
 # =========================
 # LOGIN VIEW
 # =========================
 class LoginView(APIView):
 
     def post(self, request):
-        username = request.data.get("username")
+        username = request.data.get("username") or request.data.get("email")
         password = request.data.get("password")
 
         if not username or not password:
             return Response(
-                {"error": "Username and password are required"},
+                {"error": "Email/username and password are required"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
         user = authenticate(username=username, password=password)
+
+        if not user and '@' in username:
+            # Allow login with email as well as username
+            user_obj = User.objects.filter(email__iexact=username).first()
+            if user_obj:
+                user = authenticate(username=user_obj.username, password=password)
 
         if user:
             token, created = Token.objects.get_or_create(user=user)
@@ -60,6 +105,7 @@ class LoginView(APIView):
                 "username": user.username,
                 "email": user.email,
                 "first_name": user.first_name,
+                "is_admin": user.is_staff or user.is_superuser,
                 "message": "Login successful"
             }, status=status.HTTP_200_OK)
 
@@ -67,6 +113,18 @@ class LoginView(APIView):
             {"error": "Invalid credentials"},
             status=status.HTTP_401_UNAUTHORIZED
         )
+
+
+# =========================
+# LOGOUT VIEW
+# =========================
+class LogoutView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        # Delete the token to log out the user
+        request.user.auth_token.delete()
+        return Response({"message": "Logout successful"}, status=status.HTTP_200_OK)
 
 
 # =========================
@@ -83,20 +141,23 @@ class RequestOTPView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        try:
-            user = User.objects.get(email=email)
-        except User.DoesNotExist:
+        # Case-insensitive query and get the first matched user safely
+        user = User.objects.filter(email__iexact=email).first()
+        if not user:
             return Response(
                 {"error": "No account found with this email"},
                 status=status.HTTP_404_NOT_FOUND
             )
 
+        # Delete any existing OTP codes for this user
         PasswordResetOTP.objects.filter(user=user).delete()
 
         otp_code = str(random.randint(1000, 9999))
 
+        # Save the new OTP code to the database
         PasswordResetOTP.objects.create(user=user, otp=otp_code)
 
+        email_sent = False
         try:
             send_mail(
                 subject='Your AGtv Verification Code',
@@ -105,17 +166,28 @@ class RequestOTPView(APIView):
                 recipient_list=[email],
                 fail_silently=False,
             )
+            email_sent = True
         except Exception as e:
-            PasswordResetOTP.objects.filter(user=user, otp=otp_code).delete()
-            return Response(
-                {"error": "Failed to send email. Please check server email credentials."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            # Print connection warning for local developers
+            print(f"SMTP Email Sending Failed: {e}")
 
-        return Response(
-            {"message": "OTP sent to your email"},
-            status=status.HTTP_200_OK
-        )
+        # If email was sent successfully, return normal success
+        if email_sent:
+            return Response(
+                {"message": "OTP sent to your email"},
+                status=status.HTTP_200_OK
+            )
+        else:
+            # If email fails, WE STILL KEEP THE OTP IN THE DATABASE!
+            # If DEBUG is True, we return it in the response for easy local testing in Postman
+            from django.conf import settings
+            response_data = {
+                "message": "OTP generated (Failed to send email. Check your server console or see below for the code)",
+                "warning": "SMTP server is unreachable or credentials are not configured. The OTP is recorded in the database.",
+            }
+            if settings.DEBUG:
+                response_data["otp"] = otp_code
+            return Response(response_data, status=status.HTTP_200_OK)
 
 
 # =========================
@@ -127,8 +199,12 @@ class VerifyOTPView(APIView):
         email = request.data.get('email')
         otp_entered = request.data.get('otp')
 
+        if not email or not otp_entered:
+            return Response({"error": "Email and OTP are required"}, status=400)
+
+        # Case-insensitive email query
         otp_record = PasswordResetOTP.objects.filter(
-            user__email=email,
+            user__email__iexact=email,
             otp=otp_entered
         ).last()
 
@@ -155,11 +231,12 @@ class VerifyAndResetView(APIView):
         otp_entered = request.data.get('otp')
         new_password = request.data.get('new_password')
 
-        if not new_password:
-            return Response({"error": "New password is required"}, status=400)
+        if not new_password or not email or not otp_entered:
+            return Response({"error": "Email, OTP, and new password are required"}, status=400)
 
+        # Case-insensitive email query
         otp_record = PasswordResetOTP.objects.filter(
-            user__email=email,
+            user__email__iexact=email,
             otp=otp_entered
         ).last()
 
@@ -189,7 +266,7 @@ class VerifyAndResetView(APIView):
 # VIDEO UPLOAD
 # =========================
 class VideoUploadView(APIView):
-
+    permission_classes = [IsAuthenticated, IsAdminUser]
     parser_classes = (MultiPartParser, FormParser)
 
     def post(self, request):
@@ -200,6 +277,24 @@ class VideoUploadView(APIView):
             return Response(serializer.data, status=status.HTTP_201_CREATED)
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+# =========================
+# SET LIVE STREAM
+# =========================
+class SetLiveView(APIView):
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def post(self, request, pk):
+        try:
+            live_program = LiveProgram.objects.get(pk=pk)
+            live_program.is_live = True
+            live_program.save()
+            return Response({"message": "Live stream set successfully"}, status=status.HTTP_200_OK)
+        except LiveProgram.DoesNotExist:
+            return Response({"error": "Video not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 # =========================
@@ -231,6 +326,7 @@ class VideoListView(APIView):
 # VIDEO DETAIL (RENAME/DELETE)
 # =========================
 class VideoDetailUpdateDeleteView(generics.RetrieveUpdateDestroyAPIView):
+    permission_classes = [IsAuthenticated, IsAdminUser]
     queryset = LiveProgram.objects.all()
     serializer_class = LiveProgramSerializer
 
@@ -238,6 +334,7 @@ class VideoDetailUpdateDeleteView(generics.RetrieveUpdateDestroyAPIView):
 # ADMIN ANALYTICS
 # =========================
 class AdminAnalyticsView(APIView):
+    permission_classes = [IsAuthenticated, IsAdminUser]
     
     def get(self, request):
         try:
@@ -263,4 +360,4 @@ class AdminAnalyticsView(APIView):
                 "users_growth": [2800, 3100, 3300, 3500] 
             }, status=200)
         except Exception as e:
-            return Response({"error": str(e)}, status=500)
+            return Response({"error": str(e)}, status=500)
