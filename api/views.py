@@ -343,8 +343,12 @@ class CurrentLiveStreamView(APIView):
     def get(self, request):
         # Get the latest program marked as Live
         live_program = LiveProgram.objects.filter(is_live=True).first()
+        if not live_program:
+            # Fallback to the latest uploaded video in the database
+            live_program = LiveProgram.objects.all().order_by('-id').first()
+            
         if live_program:
-            serializer = LiveProgramSerializer(live_program)
+            serializer = LiveProgramSerializer(live_program, context={'request': request})
             return Response(serializer.data)
         return Response({"error": "No live stream found"}, status=404)
 
@@ -357,7 +361,7 @@ class VideoListView(APIView):
     def get(self, request):
         # Return all videos from newest to oldest
         videos = LiveProgram.objects.all().order_by('-id')
-        serializer = LiveProgramSerializer(videos, many=True)
+        serializer = LiveProgramSerializer(videos, many=True, context={'request': request})
         return Response(serializer.data)
 
 # =========================
