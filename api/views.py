@@ -22,10 +22,48 @@ User = get_user_model()
 class RegisterView(APIView):
 
     def post(self, request):
-        serializer = UserSerializer(data=request.data)
+        data = request.data.copy()
+        email = data.get("email", "").strip()
+        username = data.get("username", "").strip()
+
+        # Sanitize username (remove spaces, only allow valid chars)
+        if not username or " " in username:
+            if username:
+                sanitized = "".join(c for c in username.replace(" ", "_") if c.isalnum() or c in ["_", "@", ".", "+", "-"])
+                username = sanitized
+            else:
+                username = email.split("@")[0]
+
+        if not username:
+            username = email.split("@")[0] or "user"
+
+        # Ensure unique username
+        base_username = username
+        counter = 1
+        while User.objects.filter(username__iexact=username).exists():
+            username = f"{base_username}_{User.objects.count() + counter}"
+            counter += 1
+
+        data["username"] = username
+
+        serializer = UserSerializer(data=data)
 
         if serializer.is_valid():
             user = serializer.save()
+
+            # Save full name details
+            full_name = request.data.get("username", "").strip()
+            if full_name:
+                parts = full_name.split(" ", 1)
+                user.first_name = parts[0]
+                if len(parts) > 1:
+                    user.last_name = parts[1]
+                user.save()
+
+                if hasattr(user, 'profile'):
+                    user.profile.full_name = full_name
+                    user.profile.save()
+
             token = Token.objects.create(user=user)
 
             return Response({
@@ -331,6 +369,51 @@ class VideoDetailUpdateDeleteView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = LiveProgramSerializer
 
 # =========================
+# VIDEO LIKE VIEW
+# =========================
+class VideoLikeView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        try:
+            video = LiveProgram.objects.get(pk=pk)
+            if video.liked_by.filter(id=request.user.id).exists():
+                video.liked_by.remove(request.user)
+                liked = False
+            else:
+                video.liked_by.add(request.user)
+                liked = True
+            video.likes_count = video.liked_by.count()
+            video.save()
+            return Response({
+                "liked": liked,
+                "likes_count": video.likes_count
+            }, status=status.HTTP_200_OK)
+        except LiveProgram.DoesNotExist:
+            return Response({"error": "Video not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# =========================
+# VIDEO SHARE VIEW
+# =========================
+class VideoShareView(APIView):
+    def post(self, request, pk):
+        try:
+            video = LiveProgram.objects.get(pk=pk)
+            video.shares_count += 1
+            video.save()
+            return Response({
+                "shares_count": video.shares_count
+            }, status=status.HTTP_200_OK)
+        except LiveProgram.DoesNotExist:
+            return Response({"error": "Video not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# =========================
 # ADMIN ANALYTICS
 # =========================
 class AdminAnalyticsView(APIView):
@@ -345,8 +428,16 @@ class AdminAnalyticsView(APIView):
             total_users = User.objects.count()
             
             # Total likes mapped across all programs
-            total_likes = LiveProgram.objects.aggregate(Sum('likes'))['likes__sum'] or 0
+            total_likes = LiveProgram.objects.aggregate(Sum('likes_count'))['likes_count__sum'] or 0
             
+            # Total shares mapped across all programs
+            total_shares = LiveProgram.objects.aggregate(Sum('shares_count'))['shares_count__sum'] or 0
+
+            # Find active live video stats
+            live_video = LiveProgram.objects.filter(is_live=True).first()
+            live_likes = live_video.liked_by.count() if live_video else 0
+            live_shares = live_video.shares_count if live_video else 0
+
             # System health mapped through basic ORM reachability connection
             system_health = "Excellent" if total_users is not None else "Degraded"
 
@@ -354,6 +445,9 @@ class AdminAnalyticsView(APIView):
                 "live_now": live_viewers,
                 "total_users": total_users,
                 "total_likes": total_likes,
+                "total_shares": total_shares,
+                "live_likes": live_likes,
+                "live_shares": live_shares,
                 "system_health": system_health,
                 # Mock weekly/monthly growth trends specifically mapped for Flutter charts
                 "viewers_over_time": [40, 110, 220, 240, 310, 360, 450], 

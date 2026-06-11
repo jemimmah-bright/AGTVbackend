@@ -59,7 +59,7 @@ class LiveProgramSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'title', 'category', 'video_file', 'is_live', 'hls_playlist_url',
             'uploaded_by', 'uploaded_by_username', 'created_at', 'updated_at',
-            'likes_count', 'viewers_count', 'user_liked'
+            'likes_count', 'viewers_count', 'user_liked', 'shares_count'
         ]
 
     def get_likes_count(self, obj):

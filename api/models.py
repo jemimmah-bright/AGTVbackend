@@ -94,6 +94,7 @@ class LiveProgram(models.Model):
     # Aggregate counts for fast querying
     likes_count = models.IntegerField(default=0)
     viewers_count = models.IntegerField(default=0)
+    shares_count = models.IntegerField(default=0)
 
     class Meta:
         ordering = ['-created_at']
